@@ -59,50 +59,51 @@ class FixtureManager:
         self.save()
         return item
 
-    async def _owned_channel_ids(self) -> set[int]:
+    async def _current_ids(self) -> tuple[set[int], set[int]]:
         channels = await self.client.guild_channels()
-        return {int(channel["id"]) for channel in channels}
+        roles = await self.client.guild_roles()
+        return (
+            {int(channel["id"]) for channel in channels},
+            {int(role["id"]) for role in roles},
+        )
 
     async def cleanup(self) -> list[str]:
-        """Delete owned fixtures only; retain failed entries for a later cleanup run."""
+        """Delete owned fixtures only; keep failures for a later retry."""
         messages: list[str] = []
         remaining: list[FixtureResource] = []
-        channel_ids = await self._owned_channel_ids()
+        channel_ids, role_ids = await self._current_ids()
 
-        channels = [resource for resource in self.registry.resources if resource.kind != "role"]
+        channels = [resource for resource in self.registry.resources if resource.kind == "channel"]
+        categories = [resource for resource in self.registry.resources if resource.kind == "category"]
         roles = [resource for resource in self.registry.resources if resource.kind == "role"]
 
-        # Delete children first, then categories, then roles. All IDs must already
-        # be demonstrably present in this configured guild before a channel delete.
-        ordered = [
-            resource for resource in reversed(channels)
-            if resource.kind == "channel"
-        ] + [
-            resource for resource in reversed(channels)
-            if resource.kind == "category"
-        ] + list(reversed(roles))
+        # Children first, then their categories, then roles.
+        ordered = list(reversed(channels)) + list(reversed(categories)) + list(reversed(roles))
 
         for resource in ordered:
             try:
                 if resource.kind == "role":
-                    if resource.id not in {int(role["id"]) for role in await self.client.guild_roles()}:
+                    if resource.id not in role_ids:
                         messages.append(f"already absent role {resource.id} ({resource.name})")
-                        continue
-                    await self.client.delete_role(
-                        resource.id,
-                        reason="School Manager E2E fixture cleanup",
-                    )
+                    else:
+                        await self.client.delete_role(
+                            resource.id,
+                            reason="School Manager E2E fixture cleanup",
+                        )
+                        messages.append(f"deleted role {resource.id} ({resource.name})")
+                        role_ids.discard(resource.id)
                 else:
+                    # A channel/category can only be targeted when we have observed
+                    # the exact ID in this configured guild. This blocks stale-ID drift.
                     if resource.id not in channel_ids:
                         messages.append(f"already absent {resource.kind} {resource.id} ({resource.name})")
-                        continue
-                    await self.client.delete_resource(
-                        resource.id,
-                        reason="School Manager E2E fixture cleanup",
-                    )
-                messages.append(f"deleted {resource.kind} {resource.id} ({resource.name})")
-                self.registry.remove(resource.id)
-                self.save()
+                    else:
+                        await self.client.delete_resource(
+                            resource.id,
+                            reason="School Manager E2E fixture cleanup",
+                        )
+                        messages.append(f"deleted {resource.kind} {resource.id} ({resource.name})")
+                        channel_ids.discard(resource.id)
             except Exception as exc:  # noqa: BLE001
                 remaining.append(resource)
                 messages.append(
@@ -110,15 +111,8 @@ class FixtureManager:
                     f"{type(exc).__name__}: {exc}"
                 )
 
-        # Preserve failed entries. Resources that disappeared independently are
-        # considered clean and therefore are not re-added to the manifest.
-        if remaining:
-            surviving_ids = {item.id for item in self.registry.resources}
-            for resource in remaining:
-                if resource.id not in surviving_ids:
-                    self.registry.add(resource)
-            self.save()
-        else:
-            self.save()
-
+        # Rebuild the manifest only from resources that actually failed. Resources
+        # that were already absent are intentionally considered clean.
+        self.registry.resources = remaining
+        self.save()
         return messages
