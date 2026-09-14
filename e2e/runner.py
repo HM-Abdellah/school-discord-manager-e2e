@@ -8,9 +8,10 @@ from collections.abc import Awaitable, Callable
 
 from .assertions import assert_guild_identity, assert_unique_role_names
 from .config import Settings
-from .discord_client import DiscordClient, DiscordAPIError
+from .discord_client import DiscordAPIError, DiscordClient
 from .fixtures import FixtureManager
 from .models import TestResult
+from .permissions import MANAGE_CHANNELS, MANAGE_ROLES, VIEW_AUDIT_LOG, has_permission
 from .reporting import Reporter
 from .run_lock import RunAlreadyActive, RunLock
 from .snapshots import snapshot_guild, snapshot_to_dict
@@ -142,25 +143,49 @@ class Runner:
             )
             return False
 
+    @staticmethod
+    def _member_permission_bits(member: dict, roles_by_id: dict[int, dict]) -> int:
+        permissions = 0
+        for raw_role_id in member.get("roles", []):
+            role = roles_by_id.get(int(raw_role_id))
+            if role is not None:
+                permissions |= int(role.get("permissions", 0))
+        return permissions
+
+    @staticmethod
+    def _top_role_position(member: dict, roles_by_id: dict[int, dict]) -> int:
+        positions = [
+            int(roles_by_id[int(raw_role_id)].get("position", 0))
+            for raw_role_id in member.get("roles", [])
+            if int(raw_role_id) in roles_by_id
+        ]
+        return max(positions, default=0)
+
     async def _environment(self, client: DiscordClient) -> tuple[str, dict]:
         me = await client.current_user()
         guild = await client.guild()
         roles = await client.guild_roles()
-        member = await client.guild_member(int(me["id"]))
         role_map = {int(role["id"]): role for role in roles}
-        permissions = 0
-        for role_id in member.get("roles", []):
-            role = role_map.get(int(role_id))
-            if role:
-                permissions |= int(role.get("permissions", 0))
+
+        runner_member = await client.guild_member(int(me["id"]))
+        runner_permissions = self._member_permission_bits(runner_member, role_map)
+        runner_top_position = self._top_role_position(runner_member, role_map)
 
         details = {
             "runner_bot_id": int(me["id"]),
             "guild_id": int(guild["id"]),
             "guild_name": guild["name"],
-            "runner_role_count": len(member.get("roles", [])),
-            "runner_computed_guild_role_permissions": permissions,
+            "runner_role_count": len(runner_member.get("roles", [])),
+            "runner_top_role_position": runner_top_position,
+            "runner_permissions": {
+                "manage_channels": has_permission(runner_permissions, MANAGE_CHANNELS),
+                "manage_roles": has_permission(runner_permissions, MANAGE_ROLES),
+                "view_audit_log": has_permission(runner_permissions, VIEW_AUDIT_LOG),
+            },
         }
+
+        if not has_permission(runner_permissions, VIEW_AUDIT_LOG):
+            details["audit_log_note"] = "Runner cannot collect audit-log evidence without View Audit Log."
 
         if self.settings.target_bot_id is not None:
             try:
@@ -170,18 +195,47 @@ class Runner:
                     f"Target School Manager bot {self.settings.target_bot_id} is not a member of the configured guild. "
                     f"Discord returned {exc.status_code}."
                 ) from exc
+
             user = target.get("user", {})
             if not bool(user.get("bot", False)):
                 raise RuntimeError(
                     f"TARGET_BOT_ID {self.settings.target_bot_id} resolves to a non-bot account."
                 )
+
+            target_permissions = self._member_permission_bits(target, role_map)
+            target_top_position = self._top_role_position(target, role_map)
+            target_permission_ok = {
+                "manage_channels": has_permission(target_permissions, MANAGE_CHANNELS),
+                "manage_roles": has_permission(target_permissions, MANAGE_ROLES),
+            }
+            if not all(target_permission_ok.values()):
+                missing = [name for name, ok in target_permission_ok.items() if not ok]
+                raise RuntimeError(
+                    "Target School Manager bot is missing required guild permission(s): "
+                    + ", ".join(missing)
+                )
+
             details["target_bot_id"] = self.settings.target_bot_id
             details["target_bot_tag"] = user.get("username")
-            details["target_bot_roles"] = [int(role_id) for role_id in target.get("roles", [])]
+            details["target_bot_top_role_position"] = target_top_position
+            details["target_bot_permissions"] = {
+                **target_permission_ok,
+                "view_audit_log": has_permission(target_permissions, VIEW_AUDIT_LOG),
+                "administrator": has_permission(target_permissions, 1 << 3),
+            }
+
+            if target_top_position <= 1:
+                raise RuntimeError(
+                    "Target School Manager bot has no usable role hierarchy above @everyone."
+                )
 
         snapshot = await snapshot_guild(client)
         assert_guild_identity(snapshot, self.settings.guild_id)
-        return "REST access and configured guild scope are valid. Target-bot membership is verified when configured.", details
+        return (
+            "REST access and configured guild scope are valid; target-bot membership, permissions, "
+            "and basic hierarchy are verified when configured.",
+            details,
+        )
 
     async def _baseline(self, client: DiscordClient) -> tuple[str, dict]:
         snapshot = await snapshot_guild(client)
