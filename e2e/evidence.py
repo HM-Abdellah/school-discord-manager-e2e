@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .discord_client import DiscordClient
+from .waiting import wait_until
 
 
 async def capture_audit_evidence(
@@ -27,3 +28,36 @@ def audit_entry_ids(evidence: dict[str, Any]) -> set[int]:
         for entry in evidence.get("entries", [])
         if isinstance(entry, dict) and str(entry.get("id", "")).isdigit()
     }
+
+
+async def wait_for_audit_entry(
+    client: DiscordClient,
+    *,
+    timeout: float,
+    interval: float,
+    actor_id: int | None = None,
+    action_type: int | None = None,
+) -> dict[str, Any]:
+    """Wait for an audit-log entry matching the optional actor/action filters."""
+
+    async def find() -> dict[str, Any] | None:
+        payload = await client.guild_audit_log(
+            user_id=actor_id,
+            action_type=action_type,
+            limit=25,
+        )
+        entries = payload.get("audit_log_entries", [])
+        if not entries:
+            return None
+        return {
+            "entry": entries[0],
+            "users": payload.get("users", []),
+            "application_commands": payload.get("application_commands", []),
+        }
+
+    return await wait_until(
+        find,
+        timeout=timeout,
+        interval=interval,
+        description="a matching Discord audit-log entry",
+    )
