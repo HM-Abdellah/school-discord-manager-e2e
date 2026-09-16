@@ -267,10 +267,37 @@ class Runner:
     def _member_permission_bits(member: dict, roles_by_id: dict[int, dict]) -> int:
         permissions = 0
         for raw_role_id in member.get("roles", []):
-            role = roles_by_id.get(int(raw_role_id))
+            try:
+                role_id = int(raw_role_id)
+            except (TypeError, ValueError):
+                continue
+            role = roles_by_id.get(role_id)
             if role is not None:
                 permissions |= int(role.get("permissions", 0))
         return permissions
+
+    @staticmethod
+    def _role_permission_details(member: dict, roles_by_id: dict[int, dict]) -> list[dict[str, object]]:
+        details: list[dict[str, object]] = []
+        for raw_role_id in member.get("roles", []):
+            try:
+                role_id = int(raw_role_id)
+            except (TypeError, ValueError):
+                continue
+            role = roles_by_id.get(role_id)
+            if role is None:
+                details.append({"id": role_id, "missing_from_guild_roles": True})
+                continue
+            details.append(
+                {
+                    "id": role_id,
+                    "name": role.get("name"),
+                    "position": int(role.get("position", 0)),
+                    "permissions": int(role.get("permissions", 0)),
+                    "managed": bool(role.get("managed", False)),
+                }
+            )
+        return details
 
     @staticmethod
     def _top_role_position(member: dict, roles_by_id: dict[int, dict]) -> int:
@@ -297,12 +324,26 @@ class Runner:
             "guild_name": guild["name"],
             "runner_role_count": len(runner_member.get("roles", [])),
             "runner_top_role_position": runner_top_position,
+            "runner_roles": self._role_permission_details(runner_member, role_map),
             "runner_permissions": {
                 "manage_channels": has_permission(runner_permissions, MANAGE_CHANNELS),
                 "manage_roles": has_permission(runner_permissions, MANAGE_ROLES),
                 "view_audit_log": has_permission(runner_permissions, VIEW_AUDIT_LOG),
             },
         }
+
+        missing_runner = [
+            name
+            for name, ok in details["runner_permissions"].items()
+            if name in {"manage_channels", "manage_roles"} and not ok
+        ]
+        if missing_runner:
+            raise RuntimeError(
+                "E2E Observer bot is missing required guild permission(s): "
+                + ", ".join(missing_runner)
+                + ". Its role permissions as observed by Discord were: "
+                + json.dumps(details["runner_roles"], ensure_ascii=False)
+            )
 
         if not has_permission(runner_permissions, VIEW_AUDIT_LOG):
             details["audit_log_note"] = "Runner cannot collect audit-log evidence without View Audit Log."
@@ -324,6 +365,7 @@ class Runner:
 
             target_permissions = self._member_permission_bits(target, role_map)
             target_top_position = self._top_role_position(target, role_map)
+            target_role_details = self._role_permission_details(target, role_map)
             target_permission_ok = {
                 "manage_channels": has_permission(target_permissions, MANAGE_CHANNELS),
                 "manage_roles": has_permission(target_permissions, MANAGE_ROLES),
@@ -333,18 +375,23 @@ class Runner:
                 raise RuntimeError(
                     "Target School Manager bot is missing required guild permission(s): "
                     + ", ".join(missing)
+                    + ". Observed target roles: "
+                    + json.dumps(target_role_details, ensure_ascii=False)
                 )
 
             details["target_bot_id"] = self.settings.target_bot_id
             details["target_bot_tag"] = user.get("username")
             details["target_bot_top_role_position"] = target_top_position
+            details["target_bot_roles"] = target_role_details
             details["target_bot_permissions"] = {
                 **target_permission_ok,
                 "view_audit_log": has_permission(target_permissions, VIEW_AUDIT_LOG),
                 "administrator": has_permission(target_permissions, 1 << 3),
             }
 
-            if target_top_position <= 1:
+            # Position 1 is a usable bot role directly above @everyone. The
+            # actual role hierarchy is enforced when the bot manages a target role.
+            if target_top_position <= 0:
                 raise RuntimeError(
                     "Target School Manager bot has no usable role hierarchy above @everyone."
                 )
@@ -352,8 +399,8 @@ class Runner:
         snapshot = await snapshot_guild(client)
         assert_guild_identity(snapshot, self.settings.guild_id)
         return (
-            "REST access and configured guild scope are valid; target-bot membership, permissions, "
-            "and basic hierarchy are verified when configured.",
+            "REST access and configured guild scope are valid; observer permissions, target-bot membership, "
+            "permissions, and basic hierarchy are verified when configured.",
             details,
         )
 
