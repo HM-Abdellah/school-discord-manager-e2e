@@ -6,8 +6,9 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 
-from .assertions import assert_guild_identity, assert_unique_role_names
 from .actor_gate import ManualActorGate
+from .assertions import assert_guild_identity, assert_unique_role_names
+from .command_catalog import get_command
 from .config import Settings
 from .discord_client import DiscordAPIError, DiscordClient
 from .fixtures import FixtureManager
@@ -42,6 +43,11 @@ class Runner:
         )
         manual_parser.add_argument("--scenario", required=True, help="Stable scenario ID, e.g. CORE-001")
         manual_parser.add_argument(
+            "--command",
+            default=None,
+            help="School Manager command name, e.g. /setup; used for destructive safety checks",
+        )
+        manual_parser.add_argument(
             "--instruction",
             required=True,
             help="Exact action the human actor must perform in Discord",
@@ -51,6 +57,11 @@ class Runner:
             type=int,
             default=None,
             help="Optional Discord user ID used to correlate audit evidence",
+        )
+        manual_parser.add_argument(
+            "--destructive",
+            action="store_true",
+            help="Explicitly allow a destructive command after E2E_ALLOW_DESTRUCTIVE=true",
         )
         manual_parser.add_argument(
             "--no-change",
@@ -97,6 +108,15 @@ class Runner:
         return 0
 
     async def manual_command(self, args: argparse.Namespace) -> int:
+        command_contract = get_command(args.command) if args.command else None
+        if command_contract and command_contract.destructive:
+            if not self.settings.destructive_allowed or not args.destructive:
+                print(
+                    "Destructive manual scenario blocked: set E2E_ALLOW_DESTRUCTIVE=true "
+                    "and pass --destructive."
+                )
+                return 2
+
         lock = RunLock(self.settings.fixture_manifest.parent / "run.lock")
         try:
             lock.acquire()
@@ -141,6 +161,8 @@ class Runner:
                 )
                 payload = {
                     "scenario_id": args.scenario,
+                    "command": command_contract.name if command_contract else None,
+                    "command_destructive": command_contract.destructive if command_contract else False,
                     "instruction": args.instruction,
                     "actor_id": args.actor_id,
                     "expect_change": not args.no_change,
@@ -156,7 +178,7 @@ class Runner:
                     },
                     "audit_before": checkpoint.before_audit,
                     "captured_at_epoch": time.time(),
-                    "note": "This artifact records Discord observation only; scenario PASS/FAIL requires the matrix-specific assertion review.",
+                    "note": "Observation artifact only; matrix-specific assertions and command-response review are required for PASS/FAIL.",
                 }
                 result_path.write_text(
                     json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
