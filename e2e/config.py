@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 
 from .pacing import PacingConfig
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 def _optional_snowflake(name: str) -> int | None:
     raw = os.getenv(name, "").strip()
@@ -33,8 +35,11 @@ class Settings:
 
     @classmethod
     def from_environment(cls) -> "Settings":
-        load_dotenv(".env.e2e")
-        load_dotenv(".env")
+        # Resolve dotenv files from the repository root instead of the process CWD.
+        # This keeps `python -m e2e ...` reliable when invoked from another directory.
+        load_dotenv(PROJECT_ROOT / ".env.e2e")
+        load_dotenv(PROJECT_ROOT / ".env")
+
         token = os.getenv("DISCORD_TOKEN", "").strip()
         if not token:
             raise RuntimeError("DISCORD_TOKEN is required.")
