@@ -8,7 +8,5 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-reports/*.json
-reports/*.html
-.e2e/fixtures.json
-.e2e/*.lock
+reports/
+.e2e/

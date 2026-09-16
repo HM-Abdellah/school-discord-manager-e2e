@@ -18,8 +18,40 @@
 | Academic year | externally visible state plus later historical state | actor | no | E |
 | Final consistency | Discord state matches expected configuration model | none/actor depending on previous test | no | F |
 
-## Current implementation rule
+## Invocation model
 
-Only Phase-A observation is executable automatically by the runner. Command-driven rows remain explicit contracts until a supported actor-invocation path is selected.
+The runner supports a human-in-the-loop live workflow:
 
-This prevents the test framework from silently turning into a self-bot or into an undocumented Discord-client emulator.
+1. The runner authenticates only as the dedicated E2E **bot account** using a bot token.
+2. The operator performs the application command in Discord with a normal user account.
+3. The runner captures a before snapshot, waits for the human action, captures the after snapshot, computes an ID-based diff, and stores evidence.
+4. Matrix-specific assertions decide whether the observed transition is a scenario pass or failure.
+
+The runner never logs in as a normal user, never accepts a user token, and never fabricates Discord interaction payloads.
+
+## Current implementation
+
+The `python -m e2e run` command performs environment sanity checks and an observation baseline. The `python -m e2e manual` command executes the human-in-the-loop observation workflow for one scenario.
+
+Example:
+
+```bash
+python -m e2e manual \
+  --scenario CORE-001 \
+  --actor-id 123456789012345678 \
+  --instruction "Use the normal Discord client to open /setup, select the configured test levels/streams, confirm the summary, and complete the build."
+```
+
+For scenarios where roles/channels are not expected to change, add `--no-change`:
+
+```bash
+python -m e2e manual \
+  --scenario CORE-005 \
+  --actor-id 123456789012345678 \
+  --no-change \
+  --instruction "Use the normal Discord client to run /status and verify the response."
+```
+
+Evidence is written below `reports/manual/<scenario-id>/` and includes the before/after snapshots plus a JSON result containing the observed diff and optional audit-log evidence.
+
+This workflow is intentionally not a fully unattended Discord command driver. Discord's supported bot API does not provide a documented way for one bot to execute another application's slash command as an arbitrary human user, and self-bot/user-token automation is out of scope.

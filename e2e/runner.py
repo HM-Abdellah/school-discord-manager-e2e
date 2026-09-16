@@ -6,7 +6,9 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 
+from .actor_gate import ManualActorGate
 from .assertions import assert_guild_identity, assert_unique_role_names
+from .command_catalog import get_command
 from .config import Settings
 from .discord_client import DiscordAPIError, DiscordClient
 from .fixtures import FixtureManager
@@ -14,7 +16,7 @@ from .models import TestResult
 from .permissions import MANAGE_CHANNELS, MANAGE_ROLES, VIEW_AUDIT_LOG, has_permission
 from .reporting import Reporter
 from .run_lock import RunAlreadyActive, RunLock
-from .snapshots import snapshot_guild, snapshot_to_dict
+from .snapshots import compare_snapshots, snapshot_guild, snapshot_to_dict
 
 TestFn = Callable[[], Awaitable[tuple[str, dict]]]
 
@@ -29,19 +31,53 @@ class Runner:
 
     async def cli(self, argv: list[str]) -> int:
         parser = argparse.ArgumentParser(prog="python -m e2e")
-        sub = parser.add_subparsers(dest="command")
+        sub = parser.add_subparsers(dest="subcommand")
         sub.add_parser("snapshot")
         run_parser = sub.add_parser("run")
         run_parser.add_argument("--suite", default=None)
         run_parser.add_argument("--test", default=None)
         run_parser.add_argument("--destructive", action="store_true")
+        manual_parser = sub.add_parser(
+            "manual",
+            help="observe one human-executed Discord scenario",
+        )
+        manual_parser.add_argument("--scenario", required=True, help="Stable scenario ID, e.g. CORE-001")
+        manual_parser.add_argument(
+            "--command",
+            dest="manager_command",
+            default=None,
+            help="School Manager command name, e.g. /setup; used for destructive safety checks",
+        )
+        manual_parser.add_argument(
+            "--instruction",
+            required=True,
+            help="Exact action the human actor must perform in Discord",
+        )
+        manual_parser.add_argument(
+            "--actor-id",
+            type=int,
+            default=None,
+            help="Optional Discord user ID used to correlate audit evidence",
+        )
+        manual_parser.add_argument(
+            "--destructive",
+            action="store_true",
+            help="Explicitly allow a destructive command after E2E_ALLOW_DESTRUCTIVE=true",
+        )
+        manual_parser.add_argument(
+            "--no-change",
+            action="store_true",
+            help="The scenario is expected not to mutate roles/channels",
+        )
         sub.add_parser("cleanup")
         args = parser.parse_args(argv)
-        command = args.command or "run"
-        if command == "snapshot":
+        subcommand = args.subcommand or "run"
+        if subcommand == "snapshot":
             return await self.snapshot_command()
-        if command == "cleanup":
+        if subcommand == "cleanup":
             return await self.cleanup_command()
+        if subcommand == "manual":
+            return await self.manual_command(args)
         return await self.run_command(args)
 
     def _client(self) -> DiscordClient:
@@ -71,6 +107,90 @@ class Runner:
             for message in await fixtures.cleanup():
                 print(message)
         return 0
+
+    async def manual_command(self, args: argparse.Namespace) -> int:
+        command_contract = get_command(args.manager_command) if args.manager_command else None
+        if command_contract and command_contract.destructive:
+            if not self.settings.destructive_allowed or not args.destructive:
+                print(
+                    "Destructive manual scenario blocked: set E2E_ALLOW_DESTRUCTIVE=true "
+                    "and pass --destructive."
+                )
+                return 2
+
+        lock = RunLock(self.settings.fixture_manifest.parent / "run.lock")
+        try:
+            lock.acquire()
+        except RunAlreadyActive as exc:
+            print(f"Run blocked: {exc}")
+            return 2
+
+        try:
+            async with self._client() as client:
+                gate = ManualActorGate(
+                    client,
+                    timeout=self.settings.request_timeout,
+                    interval=self.settings.poll_interval,
+                )
+                checkpoint = await gate.checkpoint(
+                    args.instruction,
+                    actor_id=args.actor_id,
+                )
+                if args.no_change:
+                    await asyncio.sleep(self.settings.poll_interval)
+                    after = await snapshot_guild(client)
+                    diff = compare_snapshots(checkpoint.before, after)
+                else:
+                    after, diff = await gate.wait_for_change(
+                        checkpoint,
+                        description=f"a Discord state change for {args.scenario}",
+                        require_diff=True,
+                    )
+
+                output_dir = self.settings.report_dir / "manual" / args.scenario
+                output_dir.mkdir(parents=True, exist_ok=True)
+                before_path = output_dir / "before.json"
+                after_path = output_dir / "after.json"
+                result_path = output_dir / "result.json"
+                before_path.write_text(
+                    json.dumps(snapshot_to_dict(checkpoint.before), indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                after_path.write_text(
+                    json.dumps(snapshot_to_dict(after), indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                payload = {
+                    "scenario_id": args.scenario,
+                    "command": command_contract.name if command_contract else args.manager_command,
+                    "command_destructive": command_contract.destructive if command_contract else False,
+                    "instruction": args.instruction,
+                    "actor_id": args.actor_id,
+                    "expect_change": not args.no_change,
+                    "before_snapshot": str(before_path),
+                    "after_snapshot": str(after_path),
+                    "diff": {
+                        "created": diff.created,
+                        "deleted": diff.deleted,
+                        "modified": diff.modified,
+                        "unchanged": diff.unchanged,
+                        "unexpected": diff.unexpected,
+                        "missing": diff.missing,
+                    },
+                    "audit_before": checkpoint.before_audit,
+                    "captured_at_epoch": time.time(),
+                    "note": "Observation artifact only; matrix-specific assertions and command-response review are required for PASS/FAIL.",
+                }
+                result_path.write_text(
+                    json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                assert_guild_identity(after, self.settings.guild_id)
+                print(f"Manual scenario evidence written to {output_dir}")
+                print(json.dumps(payload["diff"], indent=2, ensure_ascii=False))
+            return 0
+        finally:
+            lock.release()
 
     async def run_command(self, args: argparse.Namespace) -> int:
         if args.destructive and not self.settings.destructive_allowed:
