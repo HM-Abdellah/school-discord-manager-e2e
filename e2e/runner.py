@@ -31,7 +31,7 @@ class Runner:
 
     async def cli(self, argv: list[str]) -> int:
         parser = argparse.ArgumentParser(prog="python -m e2e")
-        sub = parser.add_subparsers(dest="command")
+        sub = parser.add_subparsers(dest="subcommand")
         sub.add_parser("snapshot")
         run_parser = sub.add_parser("run")
         run_parser.add_argument("--suite", default=None)
@@ -44,6 +44,7 @@ class Runner:
         manual_parser.add_argument("--scenario", required=True, help="Stable scenario ID, e.g. CORE-001")
         manual_parser.add_argument(
             "--command",
+            dest="manager_command",
             default=None,
             help="School Manager command name, e.g. /setup; used for destructive safety checks",
         )
@@ -70,12 +71,12 @@ class Runner:
         )
         sub.add_parser("cleanup")
         args = parser.parse_args(argv)
-        command = args.command or "run"
-        if command == "snapshot":
+        subcommand = args.subcommand or "run"
+        if subcommand == "snapshot":
             return await self.snapshot_command()
-        if command == "cleanup":
+        if subcommand == "cleanup":
             return await self.cleanup_command()
-        if command == "manual":
+        if subcommand == "manual":
             return await self.manual_command(args)
         return await self.run_command(args)
 
@@ -108,7 +109,7 @@ class Runner:
         return 0
 
     async def manual_command(self, args: argparse.Namespace) -> int:
-        command_contract = get_command(args.command) if args.command else None
+        command_contract = get_command(args.manager_command) if args.manager_command else None
         if command_contract and command_contract.destructive:
             if not self.settings.destructive_allowed or not args.destructive:
                 print(
@@ -161,7 +162,7 @@ class Runner:
                 )
                 payload = {
                     "scenario_id": args.scenario,
-                    "command": command_contract.name if command_contract else None,
+                    "command": command_contract.name if command_contract else args.manager_command,
                     "command_destructive": command_contract.destructive if command_contract else False,
                     "instruction": args.instruction,
                     "actor_id": args.actor_id,
