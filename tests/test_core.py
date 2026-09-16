@@ -7,6 +7,7 @@ from e2e.command_catalog import get_command
 from e2e.config import Settings
 from e2e.models import ChannelState, GuildSnapshot, RoleState
 from e2e.pacing import MutationPacer, PacingConfig
+from e2e.permissions import ADMINISTRATOR, MANAGE_CHANNELS, MANAGE_ROLES, has_permission
 from e2e.run_lock import RunAlreadyActive, RunLock
 from e2e.runner import Runner
 from e2e.snapshots import compare_snapshots
@@ -109,3 +110,22 @@ def test_manual_destructive_command_requires_both_guards(tmp_path: Path) -> None
         )
     )
     assert result == 2
+
+
+def test_has_permission_accepts_explicit_permission_bits() -> None:
+    assert has_permission(MANAGE_CHANNELS, MANAGE_CHANNELS)
+    assert has_permission(MANAGE_ROLES, MANAGE_ROLES)
+    assert not has_permission(0, MANAGE_CHANNELS)
+
+
+def test_has_permission_treats_administrator_as_effective_full_access() -> None:
+    assert has_permission(ADMINISTRATOR, MANAGE_CHANNELS)
+    assert has_permission(ADMINISTRATOR, MANAGE_ROLES)
+
+
+def test_member_permission_bits_ignores_unknown_role_ids(tmp_path: Path) -> None:
+    member = {"roles": ["10", "not-a-role", "999"]}
+    roles = {
+        10: {"permissions": str(MANAGE_CHANNELS)},
+    }
+    assert Runner(_settings(tmp_path))._member_permission_bits(member, roles) == MANAGE_CHANNELS
