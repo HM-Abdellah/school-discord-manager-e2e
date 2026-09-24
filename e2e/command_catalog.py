@@ -15,6 +15,8 @@ class CommandContract:
     notes: str = ""
 
 
+# Synchronized with School Discord Manager main:
+# 0f14d5f31474b3008ea2e698d52358065eda9111
 COMMANDS: tuple[CommandContract, ...] = (
     CommandContract("setup", "environment", "manual-actor", notes="Interactive select/button workflow."),
     CommandContract("build", "server", "manual-actor", notes="Mutates many roles/channels; observe with snapshots."),
@@ -31,9 +33,17 @@ COMMANDS: tuple[CommandContract, ...] = (
     CommandContract("setexam", "academic", "manual-actor"),
     CommandContract("reportabsence", "academic", "manual-actor"),
     CommandContract("status", "observation", "manual-actor", notes="Can be independently verified by snapshots/state."),
+    CommandContract("serverhealth", "observation", "manual-actor", notes="Read-only health/diagnostic command."),
+    CommandContract("adminpanel", "observation", "manual-actor", notes="Read-only administrative dashboard."),
     CommandContract("years", "academic", "manual-actor"),
     CommandContract("newyear", "academic", "manual-actor", destructive=True, notes="Changes active academic-year state."),
     CommandContract("rollbackyear", "academic", "manual-actor", destructive=True, notes="Changes academic-year state."),
+    CommandContract(
+        "create-section-threads",
+        "sections",
+        "manual-actor",
+        notes="Creates idempotent public section threads inside a managed subject channel.",
+    ),
 )
 
 
@@ -43,3 +53,7 @@ def get_command(name: str) -> CommandContract:
         if command.name.casefold() == normalized:
             return command
     raise KeyError(f"Unknown School Manager command: {name}")
+
+
+def command_names() -> tuple[str, ...]:
+    return tuple(command.name for command in COMMANDS)
