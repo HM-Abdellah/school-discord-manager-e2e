@@ -1,57 +1,71 @@
 # E2E test matrix
 
-| Area | External observation | Invocation requirement | Destructive | Phase |
-|---|---|---|---|---|
-| Environment | guild identity, bot membership, roles/channels, permissions | none | no | A |
-| Fresh build | expected categories/channels/roles | `/setup` + build actor | yes | B |
-| Build idempotency | no duplicate managed resources | `/build` twice | no | B |
-| Add stream | only target stream resources appear | `/addstream` actor | yes | B |
-| Student assignment | roles + visible channel state | `/assignstudent` actor | no | C |
-| Duplicate assignment | stable state / no duplicate enrollment | `/assignstudent` actor | no | C |
-| Transfer/history/leave | roles + externally visible state | actor | no | C |
-| Teacher workflows | role and subject-channel access changes | actor | no | C |
-| Timetable/exams/absence | destination channel and resulting messages/state | actor + attachment where needed | no | D |
-| Remove stream | only recorded target resources change | `/removestream` actor | yes | D |
-| Reset scope | managed resources deleted, fixtures/custom resources retained | owner actor | yes | D |
-| Permission boundaries | allowed/forbidden command behavior | multiple real actors | no | E |
-| Recovery | deleted managed channel/role rebuilt without duplicates | actor | yes | E |
-| Academic year | externally visible state plus later historical state | actor | no | E |
-| Final consistency | Discord state matches expected configuration model | none/actor depending on previous test | no | F |
+The canonical synchronized matrix files are stored in `matrix/` in this repository.
+
+Source application commit:
+
+```text
+school-discord-manager main
+0f14d5f31474b3008ea2e698d52358065eda9111
+```
+
+## Current coverage
+
+| Matrix | Cases | Scope |
+|---|---:|---|
+| `core_commands.json` | 20 | Core commands and destructive boundaries |
+| `permission_roles.json` | 7 | OWNER / MEMBER / MEMBER_ADMIN and role hierarchy |
+| `sections_timetable_exam.json` | 18 | Sections 1..8, timetable, exams, attachment/channel boundaries |
+| `failure_recovery.json` | 19 | Fail-closed, recovery, persistence and pending-removal boundaries |
+| `concurrency_regression.json` | 16 | Mutation serialization, concurrent assignments and regression |
+| **Total** | **80** | |
+
+## Current command surface
+
+The E2E command catalog is synchronized with the current School Manager command surface, including:
+
+- `/status`
+- `/serverhealth`
+- `/adminpanel`
+- `/create-section-threads`
+
+The section-thread command is specifically covered by live verification of active + archived public-thread idempotency. Its matrix-level behavior must not be replaced by a channel-count-only assertion.
 
 ## Invocation model
 
-The runner supports a human-in-the-loop live workflow:
+The observer bot never invokes School Manager slash commands.
 
-1. The runner authenticates only as the dedicated E2E **bot account** using a bot token.
-2. The operator performs the application command in Discord with a normal user account.
-3. The runner captures a before snapshot, waits for the human action, captures the after snapshot, computes an ID-based diff, and stores evidence.
-4. Matrix-specific assertions decide whether the observed transition is a scenario pass or failure.
+1. A normal Discord user performs the command.
+2. The observer captures the before state.
+3. The operator performs the action in the Discord client.
+4. The observer captures the after state.
+5. The operator evaluates command-response semantics and matrix expectations.
+6. Evidence is retained under `reports/manual/<scenario-id>/`.
 
-The runner never logs in as a normal user, never accepts a user token, and never fabricates Discord interaction payloads.
+## Snapshot boundary
 
-## Current implementation
+Snapshots are authoritative for structural Discord state visible through the observer:
 
-The `python -m e2e run` command performs environment sanity checks and an observation baseline. The `python -m e2e manual` command executes the human-in-the-loop observation workflow for one scenario.
+- guild identity;
+- roles;
+- channels;
+- channel parent relationships;
+- permission overwrites;
+- stable Discord IDs.
 
-Example:
+They are **not** a complete message-history/thread-content oracle. Message/thread scenarios require explicit client-side verification.
 
-```bash
-python -m e2e manual \
-  --scenario CORE-001 \
-  --actor-id 123456789012345678 \
-  --instruction "Use the normal Discord client to open /setup, select the configured test levels/streams, confirm the summary, and complete the build."
-```
+## Fault-injection boundary
 
-For scenarios where roles/channels are not expected to change, add `--no-change`:
+The failure matrix intentionally contains cases that cannot be proven through a normal happy-path Discord run. A scenario requiring SQLite corruption, persistence failure, or an injected Discord API failure needs a controlled test harness or code-level fault injection.
 
-```bash
-python -m e2e manual \
-  --scenario CORE-005 \
-  --actor-id 123456789012345678 \
-  --no-change \
-  --instruction "Use the normal Discord client to run /status and verify the response."
-```
+Never mark those cases as live PASS without actually injecting the stated fault.
 
-Evidence is written below `reports/manual/<scenario-id>/` and includes the before/after snapshots plus a JSON result containing the observed diff and optional audit-log evidence.
+## Completion rule
 
-This workflow is intentionally not a fully unattended Discord command driver. Discord's supported bot API does not provide a documented way for one bot to execute another application's slash command as an arbitrary human user, and self-bot/user-token automation is out of scope.
+A scenario is PASS only when both:
+
+1. the human actor observed the expected command/interaction semantics;
+2. the captured Discord evidence matches the scenario contract.
+
+The runner's exit code is an infrastructure result, not a matrix verdict.
