@@ -1,74 +1,115 @@
 # Live Discord E2E operator runbook
 
-This runbook describes how to execute a live scenario against an isolated Discord test guild without using self-bots, user tokens, or undocumented Discord endpoints.
+This runbook is synchronized with School Discord Manager main commit `0f14d5f31474b3008ea2e698d52358065eda9111`.
 
-## 1. Test environment
-
-Use a dedicated Discord test guild. Do not point this runner at a production school guild.
+## 1. Required processes
 
 You need:
 
-- the School Discord Manager bot installed in the test guild;
-- the E2E observer bot installed in the same test guild;
-- one normal Discord user account to perform application commands;
-- a second normal Discord user account when the matrix requires a different permission role or owner/management boundary.
+1. **School Discord Manager** running from its own repository.
+2. **school-discord-manager-e2e** running from its own repository.
+3. One normal Discord user account (OWNER).
+4. A second normal Discord user account when AUTH/CONCURRENCY scenarios require MEMBER_ADMIN or MEMBER.
+5. A dedicated E2E Discord guild.
 
-The observer bot should receive only the permissions needed for the configured observation and fixture duties. `View Audit Log` is optional; without it the run continues without audit-log evidence.
+The observer is the bot named `school-discord-manager-e2e`. Its local repository/folder is separate from the School Manager repository.
 
-## 2. Local configuration
+## 2. E2E environment
 
-Copy the template:
+From:
+
+```text
+C:\Users\user\Desktop\school-discord-manager-e2e
+```
+
+activate its own virtual environment:
 
 ```powershell
-copy .env.example .env.e2e
+cd C:\Users\user\Desktop\school-discord-manager-e2e
+.venv\Scripts\Activate.ps1
 ```
+
+Create `.env.e2e` from `.env.example` and set:
+
+```text
+DISCORD_TOKEN=<observer bot token>
+DISCORD_GUILD_ID=<dedicated E2E guild ID>
+TARGET_BOT_ID=<School Manager bot user ID>
+```
+
+Do **not** use the old variable names `E2E_BOT_TOKEN` or `E2E_GUILD_ID` with this repository.
+
+## 3. Start the School Manager
+
+In its separate terminal/repository:
+
+```powershell
+cd C:\Users\user\Desktop\school-discord-manager
+.venv\Scripts\Activate.ps1
+python bot.py
+```
+
+Confirm the School Manager starts without errors.
+
+## 4. Preflight the observer
+
+In the E2E repository terminal:
+
+```powershell
+python -m e2e run
+```
+
+Expected result:
+
+- environment sanity passes;
+- target bot is found in the configured guild;
+- required permissions/hierarchy are present;
+- baseline snapshot is captured.
+
+**Do not run `/resetserver` before this gate passes.**
+
+## 5. Scenario execution
+
+Choose the exact scenario ID from `matrix/`.
+
+Example:
+
+```powershell
+python -m e2e manual \
+  --scenario CORE-001 \
+  --actor-id 123456789012345678 \
+  --instruction "Run /setup in Discord, configure the selected test streams, confirm, and complete the build."
+```
+
+The runner waits for the normal user to perform the action. It does not execute the slash command itself.
+
+For read-only scenarios:
+
+```powershell
+python -m e2e manual \
+  --scenario CORE-005 \
+  --actor-id 123456789012345678 \
+  --no-change \
+  --instruction "Run /status in Discord and verify the response."
+```
+
+## 6. Destructive scenarios
 
 Set:
 
 ```text
-DISCORD_TOKEN=<E2E observer bot token>
-DISCORD_GUILD_ID=<dedicated test guild ID>
-TARGET_BOT_ID=<School Discord Manager bot user ID>
+E2E_ALLOW_DESTRUCTIVE=true
 ```
 
-Credentials must stay in `.env.e2e`; this file is ignored by Git and must never be committed.
+and pass `--destructive`.
 
-## 3. Validate the observer before changing the guild
+Before `/resetserver`, capture the baseline and verify the dedicated guild contains the intended managed state plus any explicit unmanaged comparison fixtures.
 
-```bash
-python -m e2e run
-```
+Never use destructive commands against a production guild.
 
-The runner validates its own bot membership and permissions, validates the target bot when `TARGET_BOT_ID` is configured, checks the guild identity, and captures an observation baseline.
+## 7. Evidence
 
-Do not continue when environment sanity fails.
-
-## 4. Run one scenario
-
-Use the exact stable scenario ID from the School Discord Manager matrix.
-
-```powershell
-python -m e2e manual `
-  --scenario CORE-001 `
-  --actor-id 123456789012345678 `
-  --instruction "Use the normal Discord client to open /setup, select the configured test levels/streams, confirm the summary, and complete the build."
-```
-
-The runner captures the before state and pauses. The operator then performs the action in Discord using the normal Discord client. When finished, press Enter in the runner terminal.
-
-For scenarios expected not to mutate roles/channels, use `--no-change`:
-
-```powershell
-python -m e2e manual `
-  --scenario CORE-005 `
-  --actor-id 123456789012345678 `
-  --no-change `
-  --instruction "Use the normal Discord client to run /status and verify the response."
-```
-
-## 5. Review evidence
-
-Each run is stored under:
+Each manual scenario produces:
 
 ```text
 reports/manual/<scenario-id>/
@@ -77,51 +118,57 @@ reports/manual/<scenario-id>/
 └── result.json
 ```
 
-`result.json` contains the observed Discord diff and the optional audit-log snapshot. A resource appearing in `created`, `deleted`, or `modified` is evidence of an external state transition; it is not by itself a pass/fail verdict.
+Review all of:
 
-## 6. Scenario verdict
+1. command response/interaction in Discord;
+2. before/after snapshot;
+3. ID-based diff;
+4. audit-log evidence when available;
+5. the exact expectation in the matching matrix case.
 
-Compare the evidence with the scenario contract in the School Discord Manager repository.
+The runner does not automatically declare a scenario PASS merely because a Discord resource changed.
 
-Record a scenario as `PASS` only when both are satisfied:
+## 8. Threads and messages
 
-1. the human actor observed the expected command response/interaction semantics;
-2. the before/after Discord evidence matches the scenario's expected external state.
+The observer snapshot is intentionally structural: roles, channels, parent relationships, and permission overwrites.
 
-A `PASS` must not be inferred solely from the process exit code of the runner.
+For message/thread scenarios such as:
 
-Record a `FAIL` when the command behavior, Discord state, authorization boundary, or resource ownership differs from the matrix expectation.
+- `/create-section-threads`;
+- `/set_timetable`;
+- `/setexam`;
+- `/reportabsence`;
 
-## 7. Destructive scenarios
+the operator must also verify the actual Discord message/thread result in the client. Do not infer message correctness from a channel snapshot alone.
 
-For destructive scenarios, set:
+## 9. Failure/recovery boundary
 
-```text
-E2E_ALLOW_DESTRUCTIVE=true
-```
+The failure matrix contains both live-testable cases and cases that require controlled fault injection.
 
-and use the runner's `--destructive` guard where applicable. Keep destructive tests confined to the isolated test guild.
+Do not claim PASS for a fault-injection case by merely executing the happy path. Record such cases separately as:
 
-Before a destructive scenario, make sure any runner-owned fixture or intentionally unmanaged comparison resource is present exactly as the scenario requires. After the scenario, use the runner cleanup command and review the cleanup manifest.
+- live verified;
+- fault-injection verified;
+- not executed.
 
-## 8. Cleanup
+## 10. Cleanup
 
-```bash
+After a scenario or suite:
+
+```powershell
 python -m e2e cleanup
 ```
 
-Cleanup is ID-based and stays within the configured guild. If cleanup fails, keep the manifest and investigate before retrying; do not broaden deletion by name.
+Cleanup is ID-scoped to the configured guild. If cleanup fails, keep the manifest and investigate the exact failed fixture instead of deleting by name.
 
-## 9. Phase 3 completion record
+## 11. Completion
 
-Keep the evidence for the executed live scenarios and record:
+Phase completion requires:
 
-- scenario ID;
-- actor account used;
-- date/time of run;
-- command response observation;
-- before/after snapshot paths;
-- result diff;
-- PASS/FAIL verdict and reason.
-
-Phase 3 is complete only when the required live scenarios have been executed against the dedicated test guild and the evidence has been reviewed.
+- synchronized matrix reviewed;
+- E2E preflight green;
+- required live scenarios executed in the dedicated guild;
+- command responses reviewed;
+- Discord evidence reviewed;
+- fault-injection cases explicitly distinguished from live cases;
+- final cleanup and final guild-state verification completed.
