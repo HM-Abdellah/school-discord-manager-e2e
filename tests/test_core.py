@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from e2e.command_catalog import get_command
+from e2e.command_catalog import command_names, get_command
 from e2e.config import Settings
 from e2e.models import ChannelState, GuildSnapshot, RoleState
 from e2e.pacing import MutationPacer, PacingConfig
@@ -52,6 +52,33 @@ def test_snapshot_diff_classifies_changes() -> None:
     assert diff.created["roles"] == [2]
     assert diff.modified["channels"] == [100]
     assert diff.unchanged["roles"] == [1]
+
+
+def test_command_catalog_matches_current_school_manager_surface() -> None:
+    expected = {
+        "setup",
+        "build",
+        "addstream",
+        "removestream",
+        "resetserver",
+        "assignstudent",
+        "studenthistory",
+        "leave_school",
+        "assignteacher",
+        "assignteacherfull",
+        "assignsubjectteachers",
+        "set_timetable",
+        "setexam",
+        "reportabsence",
+        "status",
+        "serverhealth",
+        "adminpanel",
+        "years",
+        "newyear",
+        "rollbackyear",
+        "create-section-threads",
+    }
+    assert set(command_names()) == expected
 
 
 def test_command_catalog_marks_reset_destructive() -> None:
