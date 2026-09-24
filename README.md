@@ -1,130 +1,98 @@
-# School Discord Manager — E2E Test Runner
+# School Discord Manager — E2E Observer
 
-Independent Python E2E runner for an isolated Discord guild used to validate the real external behavior of School Discord Manager.
+Independent Python E2E observer for validating the real Discord behavior of **School Discord Manager** in a dedicated test guild.
 
-## Current state
+## Compatibility
 
-The runner provides a ToS-safe observation and human-in-the-loop live E2E workflow. It can observe Discord state, capture snapshots, compare state transitions, create and clean up its own fixtures, wait for eventual consistency, collect optional audit-log evidence, serialize mutations, and stop safely under repeated rate limiting.
+This repository is synchronized with School Discord Manager:
 
-Command execution is intentionally performed by a **real normal Discord user account** in the Discord client. The runner itself authenticates only as a dedicated bot account for observation and fixture management; it never accepts or stores a user token and never fabricates slash-command interactions.
+- Target branch: `main`
+- Target commit: `0f14d5f31474b3008ea2e698d52358065eda9111`
+- E2E harness version: `0.2.0`
 
-## Design
+The synchronized matrix is stored locally under `matrix/` so the live run does not depend on a second checkout of the application repository.
+
+## Execution model
 
 ```text
-Real Discord user
-      |
-      | performs /setup, /build, /addstream, ...
-      v
-Discord client
-      |
-      v
+Normal Discord user
+       |
+       | executes slash commands in Discord
+       v
 School Discord Manager
-      |
-      | real Discord resource changes
-      v
+       |
+       | real Discord mutations
+       v
 Dedicated E2E guild
-      ^
-      |
-E2E runner bot account
-      |
-      +-- snapshots / diffs
-      +-- fixture isolation + cleanup
-      +-- optional audit evidence
-      +-- pacing / retries / run lock
-      +-- manual scenario evidence
+       ^
+       |
+Dedicated E2E observer bot
+       |
+       +-- environment gate
+       +-- snapshots / ID-based diffs
+       +-- audit-log evidence (optional)
+       +-- fixture cleanup
+       +-- pacing / retries
+       +-- cross-process run lock
+       +-- manual scenario evidence
 ```
 
-This avoids self-bot behavior while still testing the real Discord surface.
-
-## Safety model
-
-- One configured guild only (`DISCORD_GUILD_ID`).
-- No hardcoded secrets or server IDs.
-- Destructive suites require both `E2E_ALLOW_DESTRUCTIVE=true` and `--destructive`.
-- Guild mutations are serialized and paced conservatively.
-- Discord `Retry-After` is honored.
-- Repeated rate limiting stops the run instead of trying to stay just below a threshold.
-- Fixture cleanup uses exact resource IDs and refuses to delete channel fixtures that are not currently in the configured guild.
-- Failed cleanup entries remain in `.e2e/fixtures.json` for a later retry.
-- A cross-process run lock prevents two E2E runs from mutating the same test guild concurrently.
-- Credentials belong only in the local `.env.e2e` file and must never be committed.
-
-The pacing system is intended to reduce accidental burst load and let Discord state settle. It is not a mechanism for disguising automation or bypassing anti-spam systems.
-
-## Evidence
-
-When the runner has `VIEW_AUDIT_LOG`, `e2e.evidence.capture_audit_evidence()` can capture recent administrative actions through Discord's documented audit-log endpoint. Audit-log entries include the actor, action type, target, and optional reason fields; this provides supporting evidence for resource changes.
-
-Snapshots record roles and channels by stable Discord ID, including parent relationships and permission overwrites. Diffs classify created, deleted, modified, and unchanged resources.
-
-## Layout
-
-```text
-school-discord-manager-e2e/
-├── e2e/
-│   ├── __main__.py
-│   ├── runner.py
-│   ├── actor_gate.py
-│   ├── actors.py
-│   ├── command_catalog.py
-│   ├── config.py
-│   ├── discord_client.py
-│   ├── pacing.py
-│   ├── waiting.py
-│   ├── models.py
-│   ├── snapshots.py
-│   ├── assertions.py
-│   ├── fixtures.py
-│   ├── cleanup.py
-│   ├── run_lock.py
-│   ├── evidence.py
-│   └── reporting.py
-├── docs/
-│   ├── architecture.md
-│   ├── interaction-model.md
-│   ├── test-matrix.md
-│   └── live-run.md
-├── reports/
-├── .e2e/
-├── .env.example
-├── .gitignore
-├── requirements.txt
-└── pyproject.toml
-```
+The observer never logs in as a normal user, never accepts a user token, and never fabricates slash-command interactions.
 
 ## Setup
 
-```bash
+From the `school-discord-manager-e2e` directory:
+
+```powershell
 python -m venv .venv
-# Windows PowerShell
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env.e2e
 ```
 
-Put only the isolated test guild ID, runner bot token, and optional target bot ID in `.env.e2e`. Never commit it.
+Configure only the isolated test environment:
 
-## Commands
+```text
+DISCORD_TOKEN=<school-discord-manager-e2e observer bot token>
+DISCORD_GUILD_ID=<dedicated E2E guild ID>
+TARGET_BOT_ID=<school-discord-manager bot user ID>
+```
 
-Environment observation:
+Optional settings are documented in `e2e/config.py`. Never commit `.env.e2e`.
 
-```bash
-python -m e2e snapshot
+## Preflight
+
+Run this **before any destructive Discord operation**:
+
+```powershell
 python -m e2e run
 ```
 
-Manual live scenario:
+It verifies:
 
-```bash
+- observer bot membership and required permissions;
+- target School Discord Manager bot membership when configured;
+- target bot role hierarchy and required permissions;
+- guild identity;
+- unique role names;
+- a REST observation baseline.
+
+A successful preflight does not execute a School Manager slash command.
+
+## Live scenario
+
+Use the exact ID from `matrix/*.json`:
+
+```powershell
 python -m e2e manual \
   --scenario CORE-001 \
   --actor-id 123456789012345678 \
-  --instruction "Use the normal Discord client to open /setup, select the configured test levels/streams, confirm the summary, and complete the build."
+  --instruction "Use the normal Discord client to run the scenario exactly as described in matrix/core_commands.json."
 ```
 
-For a read-only scenario such as `/status` where the roles/channels should not change, use `--no-change`:
+For read-only/no-role-channel-change scenarios:
 
-```bash
+```powershell
 python -m e2e manual \
   --scenario CORE-005 \
   --actor-id 123456789012345678 \
@@ -132,22 +100,57 @@ python -m e2e manual \
   --instruction "Use the normal Discord client to run /status and verify the response."
 ```
 
-The manual command captures a before snapshot, waits for the operator to complete the action, captures the after state, computes an ID-based diff, and writes evidence under `reports/manual/<scenario-id>/`.
+The runner captures the before state, waits for the human action, captures the after state, and writes:
 
-## Live E2E completion rule
+```text
+reports/manual/<scenario-id>/
+├── before.json
+├── after.json
+└── result.json
+```
 
-A scenario is **not** automatically marked as passed just because Discord changed. The operator and test owner must compare the evidence against the corresponding scenario contract in the School Discord Manager E2E matrix and record the matrix-specific result.
+The diff is evidence, not an automatic PASS/FAIL verdict. The operator must also verify the visible command response and matrix-specific expectations.
 
-For Phase 3 completion, the live scenarios must be executed against a dedicated test guild and the results retained as evidence. The runner's role is to make the Discord observation deterministic and safe; it does not impersonate a human actor.
+## Destructive safety
 
-## Discord platform boundary
+Destructive manual scenarios require both:
 
-The project intentionally does not:
+```text
+E2E_ALLOW_DESTRUCTIVE=true
+```
 
-- automate a normal Discord user account;
-- use a user token as an actor;
-- forge or inject undocumented interaction payloads;
-- call undocumented Discord client endpoints to simulate a human;
-- use rate-limit thresholds as something to evade.
+and:
 
-If a future unattended mode is needed, use an explicit test-only application/service boundary inside School Discord Manager rather than impersonating a user account on Discord.
+```powershell
+--destructive
+```
+
+This applies to commands such as `/resetserver`, `/removestream`, and `/rollbackyear`. Keep them inside the dedicated E2E guild.
+
+## Cleanup
+
+```powershell
+python -m e2e cleanup
+```
+
+Cleanup is ID-based and refuses to broaden deletion by resource name.
+
+## Matrix
+
+The current synchronized matrix contains:
+
+- 20 core command scenarios;
+- 7 authorization/role scenarios;
+- 18 section/timetable/exam scenarios;
+- 19 failure/recovery scenarios;
+- 16 concurrency/regression scenarios.
+
+Total: **80 scenarios**.
+
+Some failure cases require controlled fault injection and must not be falsely marked as live-tested merely because the normal Discord workflow passed. The matrix itself defines the expected test boundary.
+
+## Important boundary
+
+`python -m e2e run` is an **environment gate + observation baseline**, not an unattended execution of all 80 scenarios.
+
+The real slash commands are executed by a normal Discord user. This keeps the test inside Discord's supported interaction model and avoids self-bot/user-token automation.
